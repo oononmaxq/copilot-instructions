@@ -91,9 +91,72 @@
 
 ### 4) テンプレ分割(案)
 
-| 類型           | 想定アプリ           | 特徴                     | 前提条件                         | 共通化方針                       |
-| -------------- | -------------------- | ------------------------ | -------------------------------- | -------------------------------- |
-| A: 静的（SSG） | SSG/静的ホスティング | `staticDistDir`中心      | distディレクトリが生成されること | ベーステンプレ（最小構成）       |
-| B: サーバ起動  | SPA/SSR              | `startServerCommand`中心 | startコマンドでサーバ起動可能    | サーバ起動・待機処理をテンプレ化 |
-| C: 認証あり    | ログイン後導線あり   | 認証hookが必須           | 認証情報が環境変数で渡せること   | 認証hookをextends可能に          |
-| D: モック必須  | CIで外部API接続不可  | モック起動/切替が必須    | モックサーバが独立起動可能       | モック起動スクリプト提供         |
+#### 設計方針：レイヤー分割方式
+
+軸ごとにテンプレートを分割し、**extends/includeで合成**する構成にする。
+
+```
+Layer0: base.yml
+  - 共通変数定義、artifacts、cache設定
+↓ extends
+
+Layer1: 配信方式（排他選択）
+  - static.yml: staticDistDir利用
+  - server.yml: startServerCommand利用
+↓ extends（任意）
+
+Layer2: オプション機能（組み合わせ可能）
+  - auth.yml: 認証hook追加
+  - mock.yml: モック起動処理追加
+```
+
+#### 各レイヤーの責務
+
+| レイヤー | ファイル     | 責務                                                  |
+| -------- | ------------ | ----------------------------------------------------- |
+| Layer0   | `base.yml`   | Node image指定、npm/yarn判定、artifacts/cache、upload |
+| Layer1   | `static.yml` | build実行 → `staticDistDir`でLHCI起動                 |
+| Layer1   | `server.yml` | build実行 → server起動 → readiness待機 → LHCI起動     |
+| Layer2   | `auth.yml`   | `before_script`で認証処理、puppeteerScript設定        |
+| Layer2   | `mock.yml`   | `before_script`でモックサーバ起動                     |
+
+#### アプリ側の利用例
+
+```yaml
+# .gitlab-ci.yml（アプリ側）
+include:
+  - project: "infra/lhci-templates" # テンプレート管理用の別リポジトリ
+    ref: "main" # ブランチ/タグ（省略時はデフォルトブランチ）
+    file:
+      - "/base.yml"
+      - "/server.yml" # 配信方式
+      - "/auth.yml" # 認証が必要な場合
+      - "/mock.yml" # モックが必要な場合
+
+variables:
+  APP_BUILD_CMD: "npm run build"
+  APP_START_CMD: "npm run start"
+  APP_PORT: "3000"
+```
+
+#### プリセット提供
+
+よくある組み合わせは**プリセット**として1ファイルで提供し、導入コストを下げる。
+
+| プリセット                | 内容                        | 想定アプリ            |
+| ------------------------- | --------------------------- | --------------------- |
+| `presets/static.yml`      | base + static               | SSG/静的ホスティング  |
+| `presets/server.yml`      | base + server               | SPA/SSR（認証なし）   |
+| `presets/server-auth.yml` | base + server + auth        | ログイン必須のSPA/SSR |
+| `presets/server-mock.yml` | base + server + mock        | 外部API依存のSPA/SSR  |
+| `presets/full.yml`        | base + server + auth + mock | 認証+モック両方必要   |
+
+```yaml
+# プリセット利用例（シンプルなケース）
+include:
+  - project: "infra/lhci-templates"
+    file: "/presets/server.yml"
+
+variables:
+  APP_PORT: "3000"
+```
